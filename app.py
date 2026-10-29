@@ -41,6 +41,25 @@ def plan_with_gemini(txt, channel, key):
  obj=json.loads(resp.text)
  return [dict(id=i+1,title=str(x.get('title','Sahne')),excerpt=str(x.get('excerpt','')),visual=str(x.get('visual',''))) for i,x in enumerate(obj['scenes'])]
 
+def readable_error(e, engine):
+ msg=str(e)
+ lower=msg.lower()
+ if 'api_key_invalid' in lower or 'api key not valid' in lower or 'incorrect api key' in lower:
+  return f'Geçersiz API anahtarı. Seçili servis: {engine}. Google anahtarı ile OpenAI anahtarı birbirinin yerine kullanılamaz. Ayrıntı: {msg[:700]}'
+ if 'insufficient_quota' in lower or 'billing' in lower or 'quota' in lower:
+  return f'API bakiyesi, kota veya faturalandırma sorunu. Ayrıntı: {msg[:700]}'
+ if 'model_not_found' in lower or 'does not exist' in lower:
+  return f'Model hesabında kullanılabilir değil. Ayrıntı: {msg[:700]}'
+ return f'{type(e).__name__}: {msg[:800]}'
+
+def plan_with_openai(txt, channel, key):
+ from openai import OpenAI
+ client=OpenAI(api_key=key)
+ instruction=f"""Türkçe YouTube anlatısının yönetmenisin. Kanal: {channel}. Bütün metni sırayla incele. Gerçek görsel değişimlerine göre bağımsız sahneler oluştur, tekrardan kaçın. Her sahnede title kısa Türkçe başlık, excerpt metinden kısa birebir alıntı, visual ise İngilizce ayrıntılı, tek karelik kompozisyon olsun. Asla metinde olmayan olay ekleme. Ekranda yazı veya kolaj olmasın. {CHANNEL_STYLE[channel][1]}. Kesin JSON döndür, tek anahtar scenes olsun. Metin: {txt[:60000]}"""
+ response=client.chat.completions.create(model='gpt-4.1-mini',response_format={'type':'json_object'},messages=[{'role':'user','content':instruction}])
+ obj=json.loads(response.choices[0].message.content)
+ return [dict(id=i+1,title=str(x.get('title','Sahne')),excerpt=str(x.get('excerpt','')),visual=str(x.get('visual',''))) for i,x in enumerate(obj['scenes'])]
+
 def generate_one(scene, channel, engine, key):
  base=CHANNEL_STYLE[channel][0]
  prompt=f'{scene["visual"]}\nSTYLE: {base}\nOne standalone distinct complete composition. Widescreen 16:9 landscape frame. No text, subtitles, watermark, logos, frame or panel borders.'
@@ -76,7 +95,8 @@ with st.sidebar:
  engine=st.selectbox('Görsel motoru',['Nano Banana (Google)','ChatGPT Image (OpenAI)'])
  st.caption('Google AI Pro ve ChatGPT Plus abonelikleri API ücretlerini içermez.')
  key=st.text_input('API anahtarın',type='password',help='Sadece mevcut oturumda kullanılır; indirilen dosyalara yazılmaz.')
- st.warning('Anahtarını kimseyle paylaşma. API kullanımı ayrıca ücretli olabilir.')
+ st.warning('Anahtarını kimseyle paylaşma. API kullanımı ayrıca ücretli olabilir. Herkese açık uygulamada kişisel anahtar girmek yerine özel erişim kullanman daha güvenlidir.')
+ st.caption('Nano Banana seçiliyse Google AI Studio anahtarı; ChatGPT Image seçiliyse OpenAI Platform anahtarı gerekir.')
 
 file=st.file_uploader('Senaryo dosyası (.txt veya .docx)',type=['txt','docx'])
 typed=st.text_area('Ya da senaryoyu buraya yapıştır',height=190,placeholder='Bir şehir düşünün...')
@@ -88,6 +108,8 @@ with left:
    try:
     if key and engine.startswith('Nano'):
      scenes=plan_with_gemini(script,channel,key); mode='Yapay zekâ analizi'
+    elif key and engine.startswith('ChatGPT'):
+     scenes=plan_with_openai(script,channel,key); mode='OpenAI sahne analizi'
     else:
      scenes=offline_scenes(script); mode='Ücretsiz taslak (otomatik bölme)'
     st.session_state['scenes']=scenes
@@ -97,7 +119,7 @@ with left:
     st.session_state['last_channel']=channel
    except Exception as e: st.error(f'Sahne planı oluşturulamadı: {e}')
 with right:
- st.caption('Anahtar yoksa sahne planının basit taslağı ücretsiz oluşur. Google anahtarıyla ayrıntılı sahne analizi yapılır.')
+ st.caption('Anahtar yoksa ücretsiz basit taslak; anahtar varsa seçtiğin servisle ayrıntılı sahne analizi yapılır.')
 
 if 'scenes' in st.session_state:
  scenes=st.session_state['scenes']
@@ -111,7 +133,12 @@ if 'scenes' in st.session_state:
  maxshots=len(scenes)
  count=st.number_input('Bu sefer kaç sahne üretilsin?',min_value=1,max_value=maxshots,value=min(3,maxshots),step=1)
  st.caption('İlk denemede 1–3 sahne seçmeni öneririm; her görselin API maliyeti olabilir.')
+ if st.session_state.get('last_errors'):
+  st.error('Son üretim hataları (kalıcı):')
+  for error in st.session_state['last_errors']:
+   st.code(error)
  if st.button('② Görselleri üret',type='primary',disabled=not bool(key)):
+  st.session_state['last_errors']=[]
   progress=st.progress(0)
   images=st.session_state.setdefault('images',{})
   for j,s in enumerate(scenes[:count]):
@@ -122,7 +149,7 @@ if 'scenes' in st.session_state:
      img,prompt=generate_one(s,channel,engine,key)
      images[s['id']]={'bytes':jpeg_bytes(img),'prompt':prompt}
    except Exception as e:
-    st.error(f'{s["id"]:03} üretilemedi: {e}')
+    st.session_state['last_errors'].append(f'{s["id"]:03}: '+readable_error(e,engine))
    progress.progress((j+1)/count)
   st.rerun()
  images=st.session_state.get('images',{})
